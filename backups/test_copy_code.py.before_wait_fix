@@ -1,0 +1,331 @@
+from pathlib import Path
+from datetime import datetime
+from time import sleep, monotonic
+
+from playwright.sync_api import (
+    sync_playwright,
+    TimeoutError as PlaywrightTimeout,
+)
+
+PROFILE = Path.home() / "Debugger" / "brave-agent-profile"
+MARKER = datetime.now().strftime("COPYTEST-%Y%m%d-%H%M%S")
+EXPECTED = 'print("COPY_CODE_TEST")'
+
+PROMPT = (
+    "Antworte ausschließlich mit einem einzigen Python-Codeblock. "
+    "Der Codeblock soll exakt eine Zeile enthalten: "
+    'print("COPY_CODE_TEST"). '
+    "Gib keinen zusätzlichen Text aus. "
+    f"Testkennung: {MARKER}"
+)
+
+
+def log(message):
+    print(f"[TEST] {message}", flush=True)
+
+
+with sync_playwright() as p:
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+    )
+
+    try:
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://chatgpt.com",
+        )
+
+        page = context.pages[0] if context.pages else context.new_page()
+
+        if "chatgpt.com" not in (page.url or ""):
+            page.goto(
+                "https://chatgpt.com/",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+
+        textbox = page.locator(
+            '[role="textbox"][aria-label="Ask ChatGPT"]'
+        )
+        textbox.wait_for(state="visible", timeout=60000)
+
+        log(f"Sende Anfrage mit Kennung {MARKER}.")
+        textbox.fill(PROMPT)
+
+        send_button = page.locator('button[aria-label="Send"]').last
+        send_button.wait_for(state="visible", timeout=10000)
+
+        if send_button.is_disabled():
+            raise RuntimeError("Senden-Schaltfläche ist deaktiviert.")
+
+        send_button.click()
+
+        # Die Kennung muss in einer Nutzernachricht stehen.
+        log("Warte auf die bestätigte Nutzernachricht.")
+        page.wait_for_function(
+            """marker => {
+                const hs = [...document.querySelectorAll("h4")];
+
+                return hs.some(h =>
+                    (h.innerText || "").trim() === "You said:" &&
+                    (h.parentElement?.innerText || "").includes(marker)
+                );
+            }""",
+            arg=MARKER,
+            timeout=20000,
+        )
+
+        # Erst die Assistentenantwort NACH dieser Nutzernachricht suchen.
+        # Der Codeblock in der Nutzeranfrage kann dadurch nicht als Antwort
+        # fehlinterpretiert werden.
+        log("Warte auf den Codeblock der zugehörigen Assistentenantwort.")
+        page.wait_for_function(
+            """({marker, expected}) => {
+                const hs = [...document.querySelectorAll("h4")];
+                const label = h => (h.innerText || "").trim();
+
+                const extractNodes = h => {
+                    const result = [];
+                    let n = h.nextElementSibling;
+
+                    while (n && !n.matches("h4")) {
+                        result.push(n);
+                        n = n.nextElementSibling;
+                    }
+
+                    return result;
+                };
+
+                const userIndex = hs.findIndex(h =>
+                    label(h) === "You said:" &&
+                    (h.parentElement?.innerText || "").includes(marker)
+                );
+
+                if (userIndex < 0) return false;
+
+                const answerHeading = hs
+                    .slice(userIndex + 1)
+                    .find(h => label(h) === "ChatGPT said:");
+
+                if (!answerHeading) return false;
+
+                return extractNodes(answerHeading).some(root =>
+                    [...root.querySelectorAll("pre")].some(pre =>
+                        (pre.innerText || "").includes(expected)
+                    )
+                );
+            }""",
+            arg={"marker": MARKER, "expected": "COPY_CODE_TEST"},
+            timeout=90000,
+        )
+
+        log("Codeblock in der zugehörigen Assistentenantwort gefunden.")
+
+        # Warten, bis der Code stabil ist und die Generierung beendet scheint.
+        log("Prüfe, ob die Antwortgenerierung beendet ist.")
+        deadline = monotonic() + 45
+        previous_code = None
+        stable_count = 0
+        completed = False
+
+        while monotonic() < deadline:
+            state = page.evaluate(
+                """({marker, expected}) => {
+                    const hs = [...document.querySelectorAll("h4")];
+                    const label = h => (h.innerText || "").trim();
+
+                    const userIndex = hs.findIndex(h =>
+                        label(h) === "You said:" &&
+                        (h.parentElement?.innerText || "").includes(marker)
+                    );
+
+                    if (userIndex < 0) return null;
+
+                    const answerHeading = hs
+                        .slice(userIndex + 1)
+                        .find(h => label(h) === "ChatGPT said:");
+
+                    if (!answerHeading) return null;
+
+                    const roots = [];
+                    let node = answerHeading.nextElementSibling;
+
+                    while (node && !node.matches("h4")) {
+                        roots.push(node);
+                        node = node.nextElementSibling;
+                    }
+
+                    const pres = roots.flatMap(root =>
+                        [...root.querySelectorAll("pre")]
+                    );
+
+                    const matching = pres.find(pre =>
+                        (pre.innerText || "").includes(expected)
+                    );
+
+                    if (!matching) return null;
+
+                    const stopButtons = [
+                        ...document.querySelectorAll("button")
+                    ].filter(button => {
+                        const s = [
+                            button.getAttribute("aria-label") || "",
+                            button.getAttribute("title") || "",
+                            button.getAttribute("data-testid") || ""
+                        ].join(" ").toLowerCase();
+
+                        return /stop generating|stop response|cancel response/.test(s);
+                    });
+
+                    const send = document.querySelector(
+                        'button[aria-label="Send"]'
+                    );
+
+                    return {
+                        code: matching.innerText.trim(),
+                        sendVisible: !!send &&
+                            !!(send.offsetWidth || send.offsetHeight),
+                        sendEnabled: !!send && !send.disabled,
+                        stopCount: stopButtons.filter(b =>
+                            !!(b.offsetWidth || b.offsetHeight)
+                        ).length,
+                        preCount: pres.length,
+                        answerText: roots.map(r => r.innerText || "").join("\\n")
+                    };
+                }""",
+                {"marker": MARKER, "expected": "COPY_CODE_TEST"},
+            )
+
+            if state:
+                current_code = state["code"]
+
+                if current_code == previous_code:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+
+                previous_code = current_code
+
+                if (
+                    stable_count >= 3
+                    and state["sendVisible"]
+                    and state["sendEnabled"]
+                    and state["stopCount"] == 0
+                ):
+                    completed = True
+                    break
+
+            sleep(0.5)
+
+        if not completed:
+            log(
+                "Die Fertigstellung konnte nicht sicher bestätigt werden. "
+                "Keine Kopierschaltfläche wird angeklickt."
+            )
+            raise RuntimeError("Antwort nicht sicher als fertig erkannt.")
+
+        log("Antwort ist stabil; Senden ist wieder verfügbar.")
+
+        # Jetzt ausschließlich die Codeblöcke der Assistentenantwort
+        # untersuchen. Noch wird nichts kopiert oder angeklickt.
+        info = page.evaluate(
+            """marker => {
+                const hs = [...document.querySelectorAll("h4")];
+                const label = h => (h.innerText || "").trim();
+
+                const userIndex = hs.findIndex(h =>
+                    label(h) === "You said:" &&
+                    (h.parentElement?.innerText || "").includes(marker)
+                );
+
+                if (userIndex < 0) {
+                    return {error: "Nutzernachricht nicht gefunden"};
+                }
+
+                const answerHeading = hs
+                    .slice(userIndex + 1)
+                    .find(h => label(h) === "ChatGPT said:");
+
+                if (!answerHeading) {
+                    return {error: "Assistentenantwort nicht gefunden"};
+                }
+
+                const roots = [];
+                let node = answerHeading.nextElementSibling;
+
+                while (node && !node.matches("h4")) {
+                    roots.push(node);
+                    node = node.nextElementSibling;
+                }
+
+                const pres = roots.flatMap(root =>
+                    [...root.querySelectorAll("pre")]
+                );
+
+                const blocks = pres.map((pre, index) => {
+                    const ancestors = [];
+                    let n = pre;
+
+                    for (let level = 0; n && level < 9; level++) {
+                        ancestors.push({
+                            level,
+                            tag: n.tagName,
+                            className: String(n.className || "").slice(0, 160),
+                            buttons: [...n.querySelectorAll("button")].map(b => ({
+                                ariaLabel: b.getAttribute("aria-label"),
+                                title: b.getAttribute("title"),
+                                testId: b.getAttribute("data-testid"),
+                                text: (b.innerText || "").trim(),
+                                html: b.outerHTML.slice(0, 350)
+                            }))
+                        });
+
+                        n = n.parentElement;
+                    }
+
+                    return {
+                        index,
+                        code: (pre.innerText || "").trim(),
+                        ancestors
+                    };
+                });
+
+                const send = document.querySelector(
+                    'button[aria-label="Send"]'
+                );
+
+                return {
+                    answerText: roots.map(r => r.innerText || "").join("\\n"),
+                    codeBlockCount: pres.length,
+                    sendVisible: !!send &&
+                        !!(send.offsetWidth || send.offsetHeight),
+                    sendEnabled: !!send && !send.disabled,
+                    blocks
+                };
+            }""",
+            MARKER,
+        )
+
+        print("\n--- ASSISTENTENANTWORT / CODEBLOCK-DIAGNOSE ---")
+        import json
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+
+        print(
+            "\nDiagnose beendet. Es wurde absichtlich keine "
+            "Kopierschaltfläche angeklickt."
+        )
+
+    except PlaywrightTimeout as exc:
+        log(f"TIMEOUT: {exc}")
+        raise
+    finally:
+        context.close()

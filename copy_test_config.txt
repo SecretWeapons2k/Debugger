@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "marker": "COPYTEST-TXT-CONFIG",
+  "prompt": "Erstelle genau vier Codeblöcke in dieser Reihenfolge. Verwende die angegebenen Sprachen und Inhalte unverändert. Schreibe außerhalb der Codeblöcke nur die Kennung COPYTEST-TXT-CONFIG.\n\nPython:\nprint(\"BLOCK_PYTHON\")\n\nBash:\nprintf '%s\\\\n' 'BLOCK_BASH'\n\nJavaScript:\nconsole.log(\"BLOCK_JAVASCRIPT\");\n\nJSON:\n{\"marker\":\"BLOCK_JSON\",\"ok\":true}",
+  "expected_blocks": [
+    {
+      "language": "python",
+      "code": "print(\"BLOCK_PYTHON\")"
+    },
+    {
+      "language": "bash",
+      "code": "printf '%s\\\\n' 'BLOCK_BASH'"
+    },
+    {
+      "language": "javascript",
+      "code": "console.log(\"BLOCK_JAVASCRIPT\");"
+    },
+    {
+      "language": "json",
+      "code": "{\"marker\":\"BLOCK_JSON\",\"ok\":true}"
+    }
+  ]
+}

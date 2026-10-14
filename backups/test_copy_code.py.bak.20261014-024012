@@ -1,0 +1,435 @@
+from pathlib import Path
+from datetime import datetime
+from time import monotonic
+import json
+
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+BASE = Path.home() / "Debugger"
+PROFILE = BASE / "brave-agent-profile"
+CACHE_FILE = BASE / "codeblock_cache.json"
+
+MARKER = datetime.now().strftime("COPYTEST-%Y%m%d-%H%M%S")
+EXPECTED = 'print("COPY_CODE_TEST")'
+
+PROMPT = (
+    "Antworte ausschließlich mit einem einzigen Python-Codeblock. "
+    'Dieser soll exakt diese eine Zeile enthalten: print("COPY_CODE_TEST") '
+    "Verwende Python, nicht C oder eine andere Sprache. "
+    "Gib keinen zusätzlichen Text aus. "
+    f"Testkennung: {MARKER}"
+)
+
+START = monotonic()
+
+
+def log(message):
+    print(f"[{monotonic() - START:6.1f}s] {message}", flush=True)
+
+
+def load_cache():
+    if not CACHE_FILE.exists():
+        return {"version": 1, "tests": {}}
+
+    try:
+        with CACHE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise ValueError("Cache-Wurzel ist kein JSON-Objekt")
+
+        data.setdefault("version", 1)
+        data.setdefault("tests", {})
+
+        if not isinstance(data["tests"], dict):
+            raise ValueError("'tests' ist kein JSON-Objekt")
+
+        return data
+
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        # Vorhandene Daten nicht stillschweigend überschreiben.
+        raise RuntimeError(
+            f"Cache konnte nicht sicher gelesen werden: {CACHE_FILE}: {exc}"
+        ) from exc
+
+
+def save_cache(cache):
+    """Atomisches Speichern, damit ein unterbrochener Lauf den Cache schützt."""
+    temporary = CACHE_FILE.with_suffix(".json.tmp")
+
+    with temporary.open("w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    temporary.replace(CACHE_FILE)
+
+
+# Findet die konkrete Antwort anhand der einmaligen Testkennung und
+# untersucht nur Codeblöcke zwischen ihrer Überschrift und der nächsten
+# h4-Überschrift. Der Inhalt des Codeblocks wird nicht aus dem DOM gelesen.
+FIND_ANSWER_BLOCKS = r"""
+marker => {
+    const headings = [...document.querySelectorAll("h4")];
+    const label = h => (h.innerText || "").trim();
+
+    const siblingText = h => {
+        let node = h.nextElementSibling;
+        const parts = [];
+
+        while (node && !node.matches("h4")) {
+            const value = (node.innerText || "").trim();
+            if (value) parts.push(value);
+            node = node.nextElementSibling;
+        }
+
+        return parts.join("\n").trim();
+    };
+
+    const userIndex = headings.findIndex(
+        h => label(h) === "You said:" &&
+             siblingText(h).includes(marker)
+    );
+
+    if (userIndex < 0) {
+        return {
+            error: "Testnachricht nicht gefunden",
+            foundUser: false
+        };
+    }
+
+    const assistant = headings.slice(userIndex + 1).find(
+        h => label(h) === "ChatGPT said:" && siblingText(h).length > 0
+    );
+
+    if (!assistant) {
+        return {
+            error: "Assistentenantwort nicht gefunden",
+            foundUser: true
+        };
+    }
+
+    const answerNodes = [];
+    let node = assistant.nextElementSibling;
+
+    while (node && !node.matches("h4")) {
+        answerNodes.push(node);
+        node = node.nextElementSibling;
+    }
+
+    const blocks = [];
+
+    for (const answerNode of answerNodes) {
+        if (answerNode.matches?.('[data-code-block="true"]')) {
+            blocks.push(answerNode);
+        }
+
+        blocks.push(
+            ...answerNode.querySelectorAll('[data-code-block="true"]')
+        );
+    }
+
+    const uniqueBlocks = [...new Set(blocks)];
+    const allBlocks = [...document.querySelectorAll('[data-code-block="true"]')];
+
+    const results = uniqueBlocks.map((block, answerIndex) => {
+        const button = block.querySelector(
+            'button[aria-label="Copy code"]'
+        );
+
+        const pre = block.querySelector("pre");
+        const code = block.querySelector("pre code");
+
+        // Nur Klassen für die Sprache auslesen, niemals den Codeinhalt.
+        const classes = [
+            pre?.className || "",
+            code?.className || ""
+        ].join(" ");
+
+        const languageMatch = classes.match(
+            /(?:language-|lang-)([a-zA-Z0-9_+-]+)/
+        );
+
+        return {
+            answerIndex,
+            globalIndex: allBlocks.indexOf(block),
+            language: languageMatch ? languageMatch[1] : null,
+            hasCopyButton: !!button,
+            visible: !!button && button.getClientRects().length > 0
+        };
+    });
+
+    return {
+        error: null,
+        foundUser: true,
+        foundAnswer: true,
+        blockCount: results.length,
+        blocks: results
+    };
+}
+"""
+
+
+with sync_playwright() as p:
+    log(f"Testkennung: {MARKER}")
+    cache = load_cache()
+
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+    )
+
+    try:
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://chatgpt.com",
+        )
+
+        page = context.pages[0] if context.pages else context.new_page()
+
+        if "chatgpt.com" not in (page.url or ""):
+            log("Öffne ChatGPT.")
+            page.goto(
+                "https://chatgpt.com/",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+
+        textbox = page.locator(
+            '[role="textbox"][aria-label="Ask ChatGPT"]'
+        )
+        textbox.wait_for(state="visible", timeout=60000)
+
+        log("Sende Testanfrage.")
+        textbox.fill(PROMPT)
+
+        send_button = page.locator('button[aria-label="Send"]').last
+        send_button.wait_for(state="visible", timeout=15000)
+
+        log("Warte, bis die Senden-Schaltfläche aktiviert ist.")
+        try:
+            page.wait_for_function(
+                """() => {
+                    const buttons = [
+                        ...document.querySelectorAll('button[aria-label="Send"]')
+                    ];
+                    const button = buttons.at(-1);
+
+                    return !!button &&
+                        !button.disabled &&
+                        button.getAttribute("aria-disabled") !== "true";
+                }""",
+                timeout=20000,
+            )
+        except PlaywrightTimeout:
+            state = send_button.evaluate(
+                """button => ({
+                    disabled: button.disabled,
+                    ariaDisabled: button.getAttribute("aria-disabled"),
+                    visible: button.getClientRects().length > 0
+                })"""
+            )
+            raise RuntimeError(
+                f"Senden-Schaltfläche blieb deaktiviert: {state}"
+            )
+
+        send_button.click()
+
+        log("Warte auf die aktuelle Assistentenantwort.")
+        page.wait_for_function(
+            """marker => {
+                const headings = [...document.querySelectorAll("h4")];
+                const label = h => (h.innerText || "").trim();
+
+                const siblingText = h => {
+                    let node = h.nextElementSibling;
+                    const parts = [];
+
+                    while (node && !node.matches("h4")) {
+                        const value = (node.innerText || "").trim();
+                        if (value) parts.push(value);
+                        node = node.nextElementSibling;
+                    }
+
+                    return parts.join("\\n").trim();
+                };
+
+                const userIndex = headings.findIndex(
+                    h => label(h) === "You said:" &&
+                         siblingText(h).includes(marker)
+                );
+
+                if (userIndex < 0) return false;
+
+                return headings.slice(userIndex + 1).some(
+                    h => label(h) === "ChatGPT said:" &&
+                         siblingText(h).length > 0
+                );
+            }""",
+            arg=MARKER,
+            timeout=90000,
+        )
+
+        log("Antwort erkannt.")
+        page.wait_for_timeout(1000)
+
+        result = page.evaluate(FIND_ANSWER_BLOCKS, MARKER)
+        log(f"Codeblock-Diagnose: {result}")
+
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+
+        blocks = result.get("blocks", [])
+        if not blocks:
+            raise RuntimeError("Die Antwort enthält keine erkannten Codeblöcke.")
+
+        visible_blocks = [
+            block for block in blocks
+            if block["hasCopyButton"] and block["visible"]
+        ]
+
+        if not visible_blocks:
+            raise RuntimeError(
+                "Es wurden Codeblöcke erkannt, aber keiner hat "
+                "einen sichtbaren Copy-Button."
+            )
+
+        test_entry = {
+            "marker": MARKER,
+            "url": page.url,
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            ),
+            "prompt": PROMPT,
+            "expected_by_block_index": {
+                "0": EXPECTED
+            },
+            "block_count": len(blocks),
+            "copied_block_count": 0,
+            "all_expected_checks_passed": None,
+            "code_blocks": []
+        }
+
+        log(f"{len(blocks)} Codeblock(s) in dieser Antwort erkannt.")
+
+        for block in visible_blocks:
+            answer_index = block["answerIndex"]
+            global_index = block["globalIndex"]
+
+            log(
+                f"Kopiere Codeblock {answer_index + 1}/{len(blocks)} "
+                f"(globaler DOM-Index {global_index})."
+            )
+
+            # Der Index wurde anhand des tatsächlichen Elements der
+            # aktuellen Antwort bestimmt, nicht anhand alter Antworten.
+            codeblock = page.locator(
+                '[data-code-block="true"]'
+            ).nth(global_index)
+
+            button = codeblock.locator(
+                'button[aria-label="Copy code"]'
+            )
+            button.click(timeout=10000)
+
+            page.wait_for_timeout(300)
+            copied = page.evaluate(
+                "() => navigator.clipboard.readText()"
+            )
+
+            expected = test_entry["expected_by_block_index"].get(
+                str(answer_index)
+            )
+
+            if expected is None:
+                matches_expected = None
+                status = "copied_not_compared"
+            else:
+                matches_expected = copied.strip() == expected
+                status = "passed" if matches_expected else "failed"
+
+            block_entry = {
+                "index": answer_index,
+                "global_dom_index": global_index,
+                "language": block.get("language"),
+                "copied_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+                "copied_text": copied,
+                "expected_text": expected,
+                "matches_expected": matches_expected,
+                "status": status
+            }
+
+            test_entry["code_blocks"].append(block_entry)
+            test_entry["copied_block_count"] += 1
+
+            # Zwischenspeichern nach jedem Block:
+            # Auch bei einem späteren Fehler bleiben die bisherigen
+            # Kopierergebnisse erhalten.
+            cache["tests"][MARKER] = test_entry
+            save_cache(cache)
+
+            log(
+                f"Block {answer_index + 1}: "
+                f"Sprache={block.get('language')!r}, "
+                f"Clipboard={copied!r}, "
+                f"Prüfung={status}"
+            )
+
+            if matches_expected is False:
+                raise RuntimeError(
+                    f"Codeblock {answer_index} stimmt nicht mit "
+                    f"dem erwarteten Text überein. "
+                    f"Erwartet: {expected!r}; erhalten: {copied!r}"
+                )
+
+        # Alle sichtbaren Codeblöcke wurden verarbeitet?
+        all_processed = (
+            len(visible_blocks) == len(blocks)
+        )
+
+        test_entry["all_expected_checks_passed"] = (
+            all(
+                item["matches_expected"] is not False
+                for item in test_entry["code_blocks"]
+            )
+            if all_processed else False
+        )
+        test_entry["completed_at"] = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        test_entry["complete"] = all_processed
+
+        cache["tests"][MARKER] = test_entry
+        save_cache(cache)
+
+        log(f"Cache gespeichert: {CACHE_FILE}")
+        log(
+            f"Gespeicherte Testläufe insgesamt: "
+            f"{len(cache['tests'])}"
+        )
+
+        if not all_processed:
+            raise RuntimeError(
+                "Mindestens ein erkannter Codeblock hatte keinen "
+                "sichtbaren Copy-Button und konnte nicht kopiert werden."
+            )
+
+        log(
+            "ERFOLG: Alle sichtbaren Codeblöcke wurden kopiert. "
+            "Der erwartete Testcode wurde korrekt geprüft."
+        )
+
+    except PlaywrightTimeout as exc:
+        log(f"ZEITÜBERSCHREITUNG: {exc}")
+        raise
+    finally:
+        context.close()

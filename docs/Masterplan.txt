@@ -1,0 +1,378 @@
+Ich fasse das Projekt so zusammen, dass du die Beschreibung am Anfang eines neuen Chats einfügen kannst und wir ohne erneute Grundsatzdiskussion weiterarbeiten können. Dazu bekommst du eine Checkliste mit dem aktuellen Stand, den offenen Aufgaben und den bereits erfolgreich getesteten Komponenten.
+
+Deine drei Ergänzungen sind berücksichtigt:
+- Das passende lokale LLM wird erst nach einer Beratung ausgewählt.
+- Die Sicherheitsbeschränkungen verhindern, dass der Agent ohne die erforderliche Zustimmung Reparaturen ausführt.
+- Python muss zusätzlich die Länge der Terminalausgabe prüfen, damit die Rückmeldung zuverlässig an ChatGPT Free übermittelt werden kann.
+
+# Teil 1: Projektbeschreibung für neue Chats
+
+Den folgenden Abschnitt kannst du vollständig kopieren und in einem neuen Chat als Kontext einfügen.
+
+---
+
+## Projekt: Lokaler, browsergesteuerter Debugging-Agent
+
+### 1. Ziel des Projekts
+
+Ich entwickle unter Ubuntu einen lokalen Agenten, der technische Probleme mithilfe von ChatGPT Free diagnostiziert und die Fehlersuche weitgehend automatisiert.
+
+Der Agent soll ChatGPT Free über einen automatisierten Browser ansprechen, dessen Diagnosevorschläge untersuchen, zulässige Befehle lokal ausführen und die Ergebnisse wieder an ChatGPT übermitteln.
+
+**Wichtig: ChatGPT Free wird über die Browseroberfläche angesprochen, nicht über eine kostenpflichtige API.** Der Agent soll die Fehlersuche automatisieren, ohne dass ich Antworten manuell zwischen ChatGPT und meinem Terminal kopieren muss.
+
+Python übernimmt die Browsersteuerung, die Ablaufverwaltung, die Sicherheitsprüfungen und die Ausführung lokaler Befehle. Ein lokales Sprachmodell soll später den Fortschritt der Diagnose bewerten.
+
+### 2. Geplanter Ablauf
+
+1. Ich beschreibe dem Agenten ein technisches Problem und formuliere das gewünschte Ziel.
+2. Falls das Ziel unklar ist, fragt der Agent nach, bevor die Diagnose beginnt.
+3. Der Agent übermittelt Problem und Zielsetzung über Playwright und Brave an ChatGPT Free.
+4. ChatGPT analysiert das Problem und schlägt einen konkreten Diagnoseschritt vor.
+5. Der Agent liest die Antwort aus und extrahiert den vorgeschlagenen Befehl sowie die dazugehörige Begründung.
+6. Python untersucht den Befehl auf Sicherheitsrisiken.
+7. Abhängig von der Risikoeinstufung wird der Befehl automatisch ausgeführt oder es wird eine Zustimmung verlangt.
+8. Python führt den zugelassenen Befehl aus und erfasst Terminalausgabe und Exitcode.
+9. Python prüft die Ausgabe auf sensible Daten und redigiert erkannte Geheimnisse.
+10. Python überprüft die Länge der bereinigten Ausgabe. Falls sie zu groß ist, wird sie kontrolliert gekürzt, gefiltert oder in sinnvolle Teile aufgeteilt, damit sie zuverlässig an ChatGPT Free übermittelt werden kann.
+11. Die bereinigte Ausgabe wird automatisch an ChatGPT Free zurückgesendet.
+12. ChatGPT analysiert das Ergebnis und schlägt den nächsten Diagnoseschritt vor.
+13. Ein lokales LLM bewertet den bisherigen Verlauf und schätzt ein, ob weitere Schritte sinnvoll sind, die Vorgehensweise geändert werden sollte oder das Ziel erreicht sein könnte.
+14. Der Zyklus wiederholt sich, bis das Ziel erreicht ist, kein sinnvoller Fortschritt mehr zu erwarten ist, eine Entscheidung des Benutzers erforderlich wird oder eine Abbruchbedingung greift.
+15. Am Ende erstellt der Agent einen Abschlussbericht und prüft, ob möglicherweise sensible Daten an ChatGPT übertragen wurden. Erkannte Risiken werden ausdrücklich gemeldet.
+
+### 3. Sicherheitskonzept
+
+Die Sicherheitsprüfung findet lokal in Python statt. Ein Sprachmodell darf Vorschläge machen, aber nicht eigenständig über deren Ausführung entscheiden.
+
+Es gibt drei Sicherheitsstufen.
+
+**Stufe 1: Bereits bekannte und freigegebene Diagnosebefehle**
+
+- Unbedenkliche, bekannte Befehle dürfen automatisch ausgeführt werden.
+- Die Freigabe muss auf konkrete Befehle und erlaubte Argumente begrenzt sein.
+
+**Stufe 2: Unbekannte oder zweifelhafte Befehle mit begrenztem Risiko**
+
+- Python prüft den Befehl.
+- Falls die Sicherheit nicht ausreichend geklärt ist, fragt der Agent nach.
+- Ich kann den Befehl einmalig erlauben oder ausdrücklich eine eng begrenzte dauerhafte Freigabe speichern.
+- Die Rückfrage zum Speichern einer Freigabe muss klar von der Zustimmung zur einmaligen Ausführung unterschieden werden.
+
+**Stufe 3: Riskante Aktionen**
+
+Dazu gehören insbesondere:
+- `sudo` und andere Aktionen mit erhöhten Rechten,
+- Dateiänderungen,
+- Löschen und Überschreiben,
+- andere Befehle mit erheblichen möglichen Nebenwirkungen.
+
+Solche Aktionen erfordern eine separate, ausdrückliche Zustimmung. Die gespeicherten Freigaben aus Stufe 2 dürfen diese Sicherheitsstufe niemals umgehen.
+
+Der Agent darf Reparaturen nicht eigenständig durchführen, wenn sie Änderungen am System erfordern und dafür keine Zustimmung vorliegt.
+
+### 4. Speicherung und Verlauf
+
+Es werden zwei getrennte Speicherbereiche benötigt.
+
+**A. Dauerhafte Befehlsfreigaben**
+
+Enthält die vom Benutzer ausdrücklich gespeicherten Freigaben für eng definierte Diagnosebefehle.
+
+Die Regeln müssen nachvollziehbar, überprüfbar und widerrufbar sein. Sie dürfen keine pauschale Freigabe beliebiger Shell-Befehle darstellen.
+
+**B. Diagnoseverlauf**
+
+Enthält den bisherigen Verlauf eines Auftrags:
+- ursprüngliche Zielsetzung,
+- vorgeschlagene und ausgeführte Befehle,
+- Exitcodes,
+- bereinigte Ergebnisse,
+- bisherige Erkenntnisse,
+- fehlgeschlagene Ansätze,
+- Entscheidungen und Freigaben,
+- aktuellen Status.
+
+Dieser Verlauf unterstützt das lokale LLM bei der Fortschrittsbewertung, erteilt aber selbst keine Berechtigungen.
+
+### 5. Aufgaben des lokalen LLM
+
+Das lokale LLM soll nicht primär die technische Fehlersuche übernehmen. Diese Aufgabe bleibt bei ChatGPT Free.
+
+Seine Aufgabe ist die übergeordnete Bewertung des Diagnoseverlaufs:
+
+- Entsteht durch weitere Diagnoseschritte voraussichtlich ein Mehrwert?
+- Wiederholt sich die Fehlersuche ohne neue Erkenntnisse?
+- Sollte die Vorgehensweise geändert werden?
+- Scheint das ursprüngliche Ziel erreicht?
+- Muss der Agent den Benutzer um eine Entscheidung bitten?
+- Sollte die Diagnose beendet werden?
+
+Das geeignete Modell ist noch nicht ausgewählt. Vor der Entscheidung sollen verfügbare Modelle, Hardwareanforderungen, Geschwindigkeit, Zuverlässigkeit und Qualität der Fortschrittsbewertung verglichen werden.
+
+### 6. Umgang mit langen Terminalausgaben
+
+Python muss vor jeder Rückübermittlung die Länge der Ausgabe kontrollieren.
+
+Der Agent soll:
+- eine konfigurierbare Obergrenze vorsehen,
+- irrelevante Wiederholungen und unnötige Informationen reduzieren,
+- wichtige Fehlermeldungen, Zeitstempel und Exitcodes erhalten,
+- Geheimnisse vor der Übermittlung redigieren,
+- große Ausgaben gegebenenfalls in sinnvolle Abschnitte aufteilen,
+- kenntlich machen, wenn Inhalte gekürzt oder ausgelassen wurden.
+
+Die Obergrenze muss so gewählt werden, dass ausreichend Platz für die ursprüngliche Problembeschreibung und den bisherigen Gesprächskontext bleibt. Eine zu lange Ausgabe darf nicht einfach unbemerkt abgeschnitten werden.
+
+ChatGPT soll anschließend selbst beurteilen, ob weitere Informationen benötigt werden.
+
+### 7. Abbruchbedingungen
+
+Der Agent benötigt eine kontrollierte Ablaufverwaltung.
+
+Er soll unter anderem stoppen können, wenn:
+- das definierte Ziel erreicht ist,
+- weitere Schritte keinen erkennbaren Mehrwert bieten,
+- sich Diagnoseversuche ohne neue Erkenntnisse wiederholen,
+- eine erforderliche Zustimmung fehlt,
+- das lokale LLM eine Änderung der Vorgehensweise empfiehlt und eine Benutzerentscheidung erforderlich ist,
+- eine maximale Laufzeit oder Schrittzahl erreicht ist,
+- der Benutzer den Auftrag abbricht.
+
+Das lokale LLM unterstützt diese Entscheidungen, ersetzt aber weder die Sicherheitsprüfung noch die Zustimmung des Benutzers.
+
+### 8. Abschluss und mögliche Datenlecks
+
+Am Ende prüft der Agent die von ihm erfassten Informationen darauf, ob sensible Daten möglicherweise unredigiert übermittelt wurden.
+
+Dazu gehören insbesondere:
+- API-Keys und Tokens,
+- Passwörter,
+- private Schlüssel,
+- vertrauliche Konfigurationswerte,
+- andere erkannte sensible Informationen.
+
+Die Prüfung soll mögliche Lecks melden und nachvollziehbar dokumentieren, welche Daten der Agent tatsächlich übermittelt hat, soweit dies technisch feststellbar ist.
+
+Eine absolute Garantie, dass niemals sensible Daten übertragen wurden, ist nicht möglich. Deshalb ist die Prävention durch Redigierung vor jeder Übermittlung entscheidend.
+
+### 9. Technischer Bestand
+
+Arbeitsverzeichnis:
+
+`~/Debugger`
+
+Virtuelle Python-Umgebung:
+
+`~/Debugger/venv`
+
+Wichtige Dateien und Verzeichnisse:
+
+- `test_copy_code.py`: Testet das Erkennen, Auslesen und Kopieren von Codeblöcken.
+- `copy_test_config.txt`: Enthält die Testkonfiguration und erwarteten Codeinhalte.
+- `codeblock_cache.json`: Speichert Testergebnisse und soll bestehende Einträge erhalten.
+- `brave-agent-profile/`: Persistentes Browserprofil.
+- `test_chatgpt.py`: Bereits vorhandene Funktionen zur Interaktion mit ChatGPT und zur markerbasierten Suche nach Nachrichten.
+
+Browsersteuerung:
+- Playwright mit Brave.
+- Browseradresse: `https://chatgpt.com/`
+- Eingabefeld: `[role="textbox"][aria-label="Ask ChatGPT"]`
+- Senden: `button[aria-label="Send"]`
+- Codeblöcke: `[data-code-block="true"]`
+- Kopieren: `button[aria-label="Copy code"]`
+
+Der Codeblock-Test hat zuletzt alle vier Testfälle erfolgreich bestanden: Python, Bash, JavaScript und JSON. Auch die Syntaxprüfung von `test_copy_code.py` war erfolgreich.
+
+**Diese Tests belegen nur die Funktion der getesteten Browser- und Codeblock-Komponenten, nicht die Fertigstellung des gesamten Agenten.**
+
+### 10. Arbeitsweise bei der Weiterentwicklung
+
+- Vor Änderungen zuerst den tatsächlichen Projektstand prüfen.
+- Bestehende funktionierende Komponenten wiederverwenden.
+- Keine neue Architektur einführen, die nicht zum beschriebenen Ziel gehört.
+- Bei Python-Dateien ab 300 Zeilen bevorzugt Patchskripte verwenden, keine vollständigen Ersatzdateien liefern.
+- Patchskripte sollen vor der Änderung prüfen, ob der erwartete alte Code genau einmal vorhanden ist, eine Sicherung erstellen und die geänderte Datei vor dem Schreiben auf Syntaxfehler prüfen.
+- Bei technischen Problemen nüchtern vorgehen: Ergebnisse untersuchen, bestätigte Ursachen von Vermutungen unterscheiden und nur den nächsten sinnvollen Schritt durchführen.
+- Keine kostenpflichtige API voraussetzen.
+- Sicherheitsprüfungen und Benutzerfreigaben nicht durch Modellentscheidungen ersetzen.
+
+**Arbeitsziel:** Den bestehenden Code schrittweise zu einem funktionsfähigen Diagnoseagenten verbinden, der ChatGPT Free über den Browser nutzt, Diagnosebefehle sicher ausführt, Ergebnisse bereinigt zurücksendet und den Fortschritt mit einem geeigneten lokalen LLM kontrolliert.
+
+---
+
+# Teil 2: Projekt-Checkliste zum Abhaken
+
+Diese Checkliste ist bewusst unabhängig von der ausführlichen Beschreibung. Du kannst sie in Obsidian speichern und in neuen Chats zusammen mit der Projektbeschreibung verwenden.
+
+Legende:
+
+- `[x]` = umgesetzt und anhand eines Tests bestätigt
+- `[~]` = teilweise vorhanden oder noch nicht vollständig geprüft
+- `[ ]` = offen
+- `[?]` = Entscheidung erforderlich
+
+## Phase 1 – Technische Grundlage
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [x] | Python-Umgebung einrichten | Virtuelle Umgebung vorhanden |
+| [x] | Playwright für Browsersteuerung verwenden | Bereits im Einsatz |
+| [x] | Brave über Playwright starten | Funktioniert mit dem bestehenden Profil |
+| [x] | Persistentes Brave-Profil verwenden | `brave-agent-profile/` |
+| [x] | ChatGPT-Eingabefeld erkennen | Selektor vorhanden |
+| [x] | Nachrichten über den Browser senden | Im bestehenden Testablauf vorhanden |
+| [~] | Antworten zuverlässig der richtigen Anfrage zuordnen | Markerbasierte Suche vorhanden; Gesamtintegration noch zu prüfen |
+| [x] | Codeblöcke erkennen und auslesen | Vier Sprachen erfolgreich getestet |
+| [x] | Kopierfunktion und Zwischenablage prüfen | Vier von vier Testfällen bestanden |
+| [x] | Testkonfiguration von Python-Code trennen | `copy_test_config.txt` |
+| [x] | Testergebnisse im Cache speichern | `codeblock_cache.json` vorhanden |
+| [ ] | Bestehende Komponenten zum vollständigen Agenten verbinden | Noch offen |
+
+## Phase 2 – Zielsetzung und Ablaufsteuerung
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [ ] | Eingabe für die Problembeschreibung erstellen | Ausgangspunkt des Agenten |
+| [ ] | Klare Zielsetzung für jeden Auftrag verlangen | Unklare Ziele müssen Rückfragen auslösen |
+| [ ] | Auftragsstatus verwalten | Beispielsweise wartend, aktiv, Freigabe erforderlich, abgeschlossen |
+| [ ] | Diagnosevorschläge aus ChatGPT extrahieren | Befehl und Begründung getrennt erfassen |
+| [ ] | Diagnoseverlauf persistent speichern | Getrennt von der Befehlsfreigabeliste |
+| [ ] | Wiederholungen ohne Erkenntnisgewinn erkennen | Unterstützung durch lokales LLM |
+| [ ] | Kontrollierten Abbruch implementieren | Schrittzahl, Laufzeit, Benutzerabbruch |
+| [ ] | Abschluss anhand der Zielsetzung bewerten | Nicht allein auf eine Aussage von ChatGPT vertrauen |
+
+## Phase 3 – Sicherheitsprüfung
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [ ] | Shell-Befehle strukturiert analysieren | Nicht nur nach einzelnen Schlüsselwörtern suchen |
+| [ ] | `sudo` und andere erhöhte Rechte erkennen | Separate Zustimmung erforderlich |
+| [ ] | Dateiänderungen erkennen | Separate Zustimmung erforderlich |
+| [ ] | Lösch- und Überschreiboperationen erkennen | Separate Zustimmung erforderlich |
+| [ ] | Zugriffe auf sensible Daten erkennen | Vor Ausführung und Übermittlung bewerten |
+| [ ] | Bekannte sichere Diagnosebefehle freigeben | Eng begrenzte Regeln |
+| [ ] | Unbekannte oder zweifelhafte Befehle behandeln | Nachfrage statt ungeprüfter Ausführung |
+| [ ] | Einmalige Freigabe ermöglichen | Gilt nur für den aktuellen Fall |
+| [ ] | Dauerhafte Freigabe ermöglichen | Muss ausdrücklich gewählt werden |
+| [ ] | Freigaberegeln persistent speichern | Eigene Allowlist bzw. Memory-Datei |
+| [ ] | Gespeicherte Freigaben widerrufbar machen | Regeln überprüfbar halten |
+| [ ] | Sicherheitsstufen in der Benutzeroberfläche unterscheiden | Niedrigere Freigabe darf keine riskanten Aktionen erlauben |
+| [ ] | Unsichere oder nicht klassifizierbare Befehle blockieren | Im Zweifel nicht ausführen |
+
+**Wichtiger technischer Punkt:** Shell-Befehle können komplex sein. Eine Prüfung auf `sudo`, `rm` oder ähnliche Zeichen allein reicht nicht. Verkettungen, Umleitungen, Subshells und Skripte können zusätzliche Auswirkungen haben. Wir müssen deshalb festlegen, welche Befehlsformen automatisch zugelassen werden und welche grundsätzlich eine Freigabe benötigen.
+
+## Phase 4 – Terminalausführung und Ausgabe
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [ ] | Zugelassene Befehle kontrolliert ausführen | Mit Prozessüberwachung |
+| [ ] | Laufzeitbegrenzung pro Befehl | Hängende Prozesse verhindern |
+| [ ] | Exitcode erfassen | Erfolg und Fehlschlag unterscheiden |
+| [ ] | Standardausgabe und Fehlerausgabe erfassen | `stdout` und `stderr` |
+| [ ] | Terminalausgabe auf sensible Daten untersuchen | Vor jeder Rückübermittlung |
+| [ ] | API-Keys und Tokens redigieren | Geheimnisse nicht unbereinigt übertragen |
+| [ ] | Passwörter und private Schlüssel berücksichtigen | Zusätzliche Erkennungsmuster |
+| [ ] | Länge der Ausgabe prüfen | Konfigurierbare Obergrenze |
+| [ ] | Zu große Ausgaben sinnvoll kürzen oder aufteilen | Keine unbemerkte Informationsvernichtung |
+| [ ] | Wichtige Fehlermeldungen erhalten | Beim Bereinigen priorisieren |
+| [ ] | Übermittelte Inhalte protokollieren | Grundlage für die Abschlussprüfung |
+
+## Phase 5 – Rückkopplung mit ChatGPT Free
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [ ] | Bereinigte Ausgabe automatisch an ChatGPT senden | Kein manuelles Kopieren |
+| [ ] | Nächste Diagnoseantwort zuverlässig erfassen | Richtige Antwort zum aktuellen Auftrag |
+| [ ] | Neue Diagnosevorschläge extrahieren | Nächster Zyklus |
+| [ ] | Fehlende Informationen nachfordern | ChatGPT darf zusätzliche Diagnoseinformationen anfordern |
+| [ ] | Wiederholte oder widersprüchliche Vorschläge behandeln | Gemeinsam mit Fortschrittskontrolle |
+| [ ] | Vollständigen Diagnosezyklus testen | Von der Problemangabe bis zum nächsten Schritt |
+| [ ] | Abbruch und Wiederaufnahme testen | Kein unkontrollierter Dauerlauf |
+
+## Phase 6 – Lokales LLM auswählen und integrieren
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [?] | Verfügbare lokale Modelle erfassen | Noch nicht entschieden |
+| [ ] | Geeignete Modelle vergleichen | Qualität, Geschwindigkeit, Hardwarebedarf |
+| [ ] | Geeignetes Modell für Fortschrittskontrolle auswählen | Keine kostenpflichtige API voraussetzen |
+| [ ] | Lokalen Zugriff auf das Modell einrichten | Abhängig von der vorhandenen Umgebung |
+| [ ] | Eingabeformat für den Diagnoseverlauf definieren | Kompakte Zusammenfassung statt unnötig langer Historie |
+| [ ] | Wiederholungen ohne Mehrwert erkennen | Eine Kernaufgabe |
+| [ ] | Strategiewechsel empfehlen | Bei erfolglosen Diagnoseansätzen |
+| [ ] | Wahrscheinlichen Abschluss erkennen | Gegen die ursprüngliche Zielsetzung prüfen |
+| [ ] | Unsichere Entscheidungen an den Benutzer geben | LLM ist keine Sicherheitsinstanz |
+
+## Phase 7 – Abschluss und Datenleck-Prüfung
+
+| Status | Aufgabe | Anmerkung |
+|---|---|---|
+| [ ] | Abschlussbericht erstellen | Ziel, ausgeführte Diagnosen, Erkenntnisse |
+| [ ] | Mögliche Datenlecks überprüfen | Soweit anhand der erfassten Daten möglich |
+| [ ] | Erkannte sensible Werte und Übermittlungen dokumentieren | Keine Geheimnisse unnötig erneut ausgeben |
+| [ ] | Bei möglichen Lecks warnen | Klar zwischen Verdacht und bestätigtem Leak unterscheiden |
+| [ ] | Grenzen der Prüfung transparent machen | Keine absolute Garantie |
+| [ ] | Gesamtablauf mit realistischen Fehlerfällen testen | Erst nach Integration aller Komponenten |
+
+---
+
+# Teil 3: Was wir als Nächstes tatsächlich machen sollten
+
+Ich würde nicht alle offenen Punkte gleichzeitig bearbeiten. Sinnvoll ist diese Reihenfolge:
+
+**1. Bestand prüfen.**  
+Wir sehen uns zunächst `test_chatgpt.py`, `test_copy_code.py` und die übrigen relevanten Projektdateien an. Wir bauen nichts doppelt.
+
+**2. Zielsetzung und Nachrichtenzyklus implementieren.**  
+Der Agent muss eine Problembeschreibung entgegennehmen, bei Bedarf nachfragen, den Auftrag an ChatGPT übermitteln und die passende Antwort erkennen.
+
+**3. Sicherheitsmodell entwickeln.**  
+Bevor wir Terminalbefehle automatisch ausführen, legen wir die drei Freigabestufen, die dauerhafte Befehlsfreigabe und die Regeln für unbekannte Befehle fest.
+
+**4. Kontrollierte Terminalausführung integrieren.**  
+Erst danach folgen Prozessüberwachung, Ausgabeerfassung, Geheimniserkennung und Längenbegrenzung.
+
+**5. Den Rückkopplungszyklus herstellen.**  
+Die bereinigte Ausgabe geht an ChatGPT zurück. Der nächste Diagnosevorschlag durchläuft erneut die Sicherheitsprüfung.
+
+**6. Lokales LLM auswählen.**  
+Wir beraten zuerst, welches Modell für die Fortschrittskontrolle am besten geeignet ist. Du musst diese Entscheidung jetzt noch nicht treffen.
+
+**7. Abschlussprüfung und Gesamttests ergänzen.**  
+Zum Schluss testen wir den gesamten Ablauf einschließlich Sicherheitsfreigaben, Abbruchbedingungen und möglicher Datenlecks.
+
+### Eine zusätzliche technische Empfehlung
+
+Die Ausgabe sollte nicht allein anhand ihrer Zeichenanzahl begrenzt werden. Für die Übermittlung an ChatGPT ist auch die ungefähre Tokenmenge relevant. Ich würde daher eine konfigurierbare Sicherheitsgrenze mit einer Reserve für die ursprüngliche Anfrage und den bisherigen Gesprächskontext vorsehen.
+
+Wenn eine Ausgabe zu lang ist, sollte Python zunächst wiederholte und unwichtige Zeilen entfernen, anschließend relevante Abschnitte priorisieren und gegebenenfalls mehrere Teile erzeugen. Jeder ausgelassene Abschnitt sollte kenntlich gemacht werden. So kann ChatGPT erkennen, ob für die weitere Diagnose noch gezielt Informationen angefordert werden müssen.
+
+**Damit haben wir jetzt eine belastbare Projektbeschreibung und eine Arbeitsliste.** Für den nächsten Chat reichen die Projektbeschreibung, die Checkliste und der aktuelle Stand der Dateien aus. Wir müssen die Architektur dann nicht wieder von vorne diskutieren.
+
+
+## Stagnationserkennung und Fortschrittsbewertung
+
+### Vereinbarte Konzeption
+
+- **Auswertungsfenster:** rollierend die letzten 10 ChatGPT-Prompts.
+- **Protokollierung:** ChatGPT-Prompts und einzelne Diagnoseaktionen getrennt erfassen.
+- **Berechnungsgrundlage:** ausschließlich bewertbare Diagnoseaktionen, nicht die Anzahl der Prompts.
+- **Stagnation:** Eine Diagnoseaktion zählt als stagnierend, wenn sie eine Wiederholung ohne neue Erkenntnisse darstellt. Sinnvolle Kontrolltests nach Reparaturen dürfen nicht allein wegen ihrer Wiederholung als Stagnation gelten.
+- **Stagnationsquote:**
+
+  Wiederholungen ohne neue Erkenntnisse / alle bewertbaren Diagnoseaktionen × 100 %
+
+- **Vergleichbarkeit:** Variable Bestandteile wie Zeitstempel und Prozess-IDs bei Ergebnisvergleichen normalisieren.
+- **Keine vorschnellen Schlussfolgerungen:** Eine veränderte Ausgabe ist nicht automatisch tatsächlicher Fortschritt. ChatGPTs eigene Aussagen über den Wert seiner Erkenntnisse sind kein verlässliches Fortschrittskriterium.
+- **Mindestdatenbasis:** Bei zu wenigen bewertbaren Diagnoseaktionen keine Quote auslösen.
+- **Grenzwert:** Konfigurierbar. 70 % sind lediglich ein ungetesteter Startwert, kein endgültig festgelegter Optimalwert.
+- **Aufgabe der lokalen LLM:** Bei erreichter Schwelle den bisherigen Verlauf bewerten und eine Strategieänderung oder einen konkreten Reparaturversuch empfehlen.
+- **Historie:** Den vollständigen Verlauf dauerhaft protokollieren. Das rollierende 10-Prompt-Fenster dient nur der Berechnung; die lokale LLM kann bei ihrer Bewertung auf die gesamte Historie zurückgreifen.
+- **Sicherheit:** Python setzt die Sicherheitsregeln durch. Die lokale LLM kann keine Ausführungsfreigaben erteilen.
+
+### Nächster Entwicklungsschritt
+
+Zuerst den bestehenden Browser-Test vervollständigen: zuverlässig erkennen, welche Assistant-Antwort zur aktuellen Anfrage gehört und wann ChatGPT tatsächlich fertig ist. Anschließend die strukturierte Erfassung von Prompts, Diagnoseaktionen und Ergebnissen implementieren und darauf die Stagnationserkennung aufbauen.
+
+Vor Implementierung größerer Änderungen den bestehenden Projektstand prüfen. Keine vorhandenen Dateien löschen.

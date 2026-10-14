@@ -1,0 +1,273 @@
+from pathlib import Path
+from datetime import datetime
+from time import monotonic
+
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+PROFILE = Path.home() / "Debugger" / "brave-agent-profile"
+MARKER = datetime.now().strftime("COPYTEST-%Y%m%d-%H%M%S")
+EXPECTED = 'print("COPY_CODE_TEST")'
+
+PROMPT = (
+    "Antworte ausschließlich mit einem einzigen Python-Codeblock. "
+    'Dieser soll exakt diese eine Zeile enthalten: print("COPY_CODE_TEST") '
+    "Verwende Python, nicht C oder eine andere Sprache. "
+    "Gib keinen zusätzlichen Text aus. "
+    f"Testkennung: {MARKER}"
+)
+
+START = monotonic()
+
+
+def log(message):
+    print(f"[{monotonic() - START:6.1f}s] {message}", flush=True)
+
+
+# Sucht die Antwort, die auf die Nutzernachricht mit unserer Testkennung folgt.
+FIND_ANSWER = r"""
+marker => {
+    const headings = [...document.querySelectorAll("h4")];
+    const label = h => (h.innerText || "").trim();
+
+    const extract = h => {
+        let node = h.nextElementSibling;
+        const parts = [];
+
+        while (node && !node.matches("h4")) {
+            const value = (node.innerText || "").trim();
+            if (value) parts.push(value);
+            node = node.nextElementSibling;
+        }
+
+        return parts.join("\n").trim();
+    };
+
+    const userIndex = headings.findIndex(
+        h => label(h) === "You said:" && extract(h).includes(marker)
+    );
+
+    if (userIndex < 0) {
+        return {foundUser: false, foundAnswer: false};
+    }
+
+    const assistant = headings.slice(userIndex + 1).find(
+        h => label(h) === "ChatGPT said:" && extract(h).length > 0
+    );
+
+    return {
+        foundUser: true,
+        foundAnswer: !!assistant,
+        answerHeadingIndex: assistant ? headings.indexOf(assistant) : -1
+    };
+}
+"""
+
+with sync_playwright() as p:
+    log(f"Testkennung: {MARKER}")
+
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+    )
+
+    try:
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://chatgpt.com",
+        )
+
+        page = context.pages[0] if context.pages else context.new_page()
+
+        if "chatgpt.com" not in (page.url or ""):
+            log("Öffne ChatGPT.")
+            page.goto(
+                "https://chatgpt.com/",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+
+        textbox = page.locator(
+            '[role="textbox"][aria-label="Ask ChatGPT"]'
+        )
+        textbox.wait_for(state="visible", timeout=60000)
+
+        log("Sende Testanfrage.")
+        textbox.fill(PROMPT)
+
+        send_button = page.locator('button[aria-label="Send"]').last
+        send_button.wait_for(state="visible", timeout=15000)
+
+        log("Warte, bis die Senden-Schaltfläche aktiviert ist.")
+        try:
+            page.wait_for_function(
+                """() => {
+                    const buttons = [
+                        ...document.querySelectorAll('button[aria-label="Send"]')
+                    ];
+                    const button = buttons.at(-1);
+                    return !!button &&
+                        !button.disabled &&
+                        button.getAttribute("aria-disabled") !== "true";
+                }""",
+                timeout=20000,
+            )
+        except PlaywrightTimeout:
+            state = send_button.evaluate(
+                """button => ({
+                    disabled: button.disabled,
+                    ariaDisabled: button.getAttribute("aria-disabled"),
+                    visible: button.getClientRects().length > 0
+                })"""
+            )
+            raise RuntimeError(
+                f"Senden-Schaltfläche blieb deaktiviert: {state}"
+            )
+
+        send_button.click()
+
+        log("Warte auf die aktuelle Assistentenantwort.")
+        page.wait_for_function(
+            """marker => {
+                const headings = [...document.querySelectorAll("h4")];
+                const label = h => (h.innerText || "").trim();
+
+                const extract = h => {
+                    let node = h.nextElementSibling;
+                    const parts = [];
+                    while (node && !node.matches("h4")) {
+                        const value = (node.innerText || "").trim();
+                        if (value) parts.push(value);
+                        node = node.nextElementSibling;
+                    }
+                    return parts.join("\\n").trim();
+                };
+
+                const userIndex = headings.findIndex(
+                    h => label(h) === "You said:" &&
+                         extract(h).includes(marker)
+                );
+
+                if (userIndex < 0) return false;
+
+                return headings.slice(userIndex + 1).some(
+                    h => label(h) === "ChatGPT said:" &&
+                         extract(h).length > 0
+                );
+            }""",
+            arg=MARKER,
+            timeout=90000,
+        )
+
+        log("Antwort erkannt.")
+        page.wait_for_timeout(1000)
+
+        # Der Copy-Button wird über den Antwortbereich gesucht,
+        # nicht über den Inhalt des Codeblocks.
+        result = page.evaluate(
+            """marker => {
+                const headings = [...document.querySelectorAll("h4")];
+                const label = h => (h.innerText || "").trim();
+
+                const extract = h => {
+                    let node = h.nextElementSibling;
+                    const parts = [];
+                    while (node && !node.matches("h4")) {
+                        const value = (node.innerText || "").trim();
+                        if (value) parts.push(value);
+                        node = node.nextElementSibling;
+                    }
+                    return parts.join("\\n").trim();
+                };
+
+                const userIndex = headings.findIndex(
+                    h => label(h) === "You said:" &&
+                         extract(h).includes(marker)
+                );
+
+                if (userIndex < 0) return {error: "Testnachricht nicht gefunden"};
+
+                const assistant = headings.slice(userIndex + 1).find(
+                    h => label(h) === "ChatGPT said:" && extract(h).length > 0
+                );
+
+                if (!assistant) return {error: "Assistentenantwort nicht gefunden"};
+
+                // Die Antwortüberschrift und ihr Inhalt werden gemeinsam
+                // über den nächsten passenden Antwortbereich lokalisiert.
+                let node = assistant.nextElementSibling;
+                let answerContainer = assistant.parentElement;
+
+                while (answerContainer && !answerContainer.querySelector(
+                    '[data-code-block="true"]'
+                )) {
+                    answerContainer = answerContainer.parentElement;
+                    if (answerContainer === document.body) break;
+                }
+
+                if (!answerContainer) {
+                    return {error: "Antwortcontainer nicht gefunden"};
+                }
+
+                const blocks = [
+                    ...answerContainer.querySelectorAll('[data-code-block="true"]')
+                ];
+
+                const buttons = blocks.map((block, index) => {
+                    const button = block.querySelector(
+                        'button[aria-label="Copy code"]'
+                    );
+                    return {
+                        index,
+                        button,
+                        visible: !!button && button.getClientRects().length > 0
+                    };
+                }).filter(item => item.visible);
+
+                return {
+                    error: buttons.length ? null : "Kein sichtbarer Copy-Button in der Antwort",
+                    buttonIndex: buttons.length ? buttons[0].index : -1,
+                    visibleButtonCount: buttons.length
+                };
+            }""",
+            MARKER,
+        )
+
+        log(f"Antwort- und Button-Diagnose: {result}")
+
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+
+        # Button direkt im gefundenen Antwort-Codeblock anklicken.
+        button = page.locator('[data-code-block="true"]').filter(
+            has=page.locator('button[aria-label="Copy code"]')
+        ).nth(result["buttonIndex"]).locator('button[aria-label="Copy code"]')
+
+        button.click(timeout=10000)
+        log("Copy-Button angeklickt.")
+
+        page.wait_for_timeout(500)
+        copied = page.evaluate("() => navigator.clipboard.readText()")
+
+        log(f"Zwischenablage: {copied!r}")
+
+        if copied.strip() != EXPECTED:
+            raise RuntimeError(
+                f"Falscher Zwischenablageinhalt: erwartet {EXPECTED!r}, "
+                f"erhalten {copied!r}"
+            )
+
+        log("ERFOLG: Zwischenablage enthält exakt den erwarteten Code.")
+
+    except PlaywrightTimeout as exc:
+        log(f"ZEITÜBERSCHREITUNG: {exc}")
+        raise
+    finally:
+        context.close()

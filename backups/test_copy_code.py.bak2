@@ -1,0 +1,206 @@
+from pathlib import Path
+from datetime import datetime
+from time import sleep
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+PROFILE = Path.home() / "Debugger" / "brave-agent-profile"
+MARKER = datetime.now().strftime("%Y%m%d_%H%M%S")
+EXPECTED = 'print("COPY_CODE_TEST")'
+
+PROMPT = (
+    "Gib ausschließlich diesen Python-Code in genau einem Codeblock aus. "
+    "Keinen zusätzlichen Text und keine Erklärungen:\n\n"
+    '```python\nprint("COPY_CODE_TEST")\n```'
+)
+
+
+def log(message):
+    print(f"[TEST] {message}", flush=True)
+
+
+with sync_playwright() as p:
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+    )
+
+    try:
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://chatgpt.com",
+        )
+
+        page = context.pages[0] if context.pages else context.new_page()
+
+        if "chatgpt.com" not in (page.url or ""):
+            page.goto(
+                "https://chatgpt.com/",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+
+        textbox = page.locator(
+            '[role="textbox"][aria-label="Ask ChatGPT"]'
+        )
+        textbox.wait_for(state="visible", timeout=60000)
+
+        log("Sende Anfrage für einen Python-Codeblock.")
+        textbox.fill(PROMPT)
+
+        send_button = page.locator('button[aria-label="Send"]').last
+        send_button.wait_for(state="visible", timeout=10000)
+
+        if send_button.is_disabled():
+            raise RuntimeError("Senden-Schaltfläche ist deaktiviert.")
+
+        send_button.click()
+
+        log("Warte auf den Codeblock.")
+        page.wait_for_function(
+            """() => [...document.querySelectorAll("pre")]
+                .some(pre => (pre.innerText || "").includes("COPY_CODE_TEST"))""",
+            timeout=90000,
+        )
+
+        # Auf den vollständigen Codeblock warten.
+        sleep(1)
+
+        code_blocks = page.locator("pre")
+        matching_index = None
+
+        for i in range(code_blocks.count()):
+            if "COPY_CODE_TEST" in code_blocks.nth(i).inner_text():
+                matching_index = i
+                break
+
+        if matching_index is None:
+            raise RuntimeError("Codeblock wurde nicht mehr gefunden.")
+
+        code_block = code_blocks.nth(matching_index)
+        displayed_code = code_block.inner_text().strip()
+
+        log(f"Angezeigter Code: {displayed_code!r}")
+
+        # Die zum Codeblock gehörende Kopierschaltfläche suchen.
+        # "Copy message" ist ausdrücklich ausgeschlossen.
+        click_result = page.evaluate(
+            """(expectedText) => {
+                const pre = [...document.querySelectorAll("pre")].find(el =>
+                    (el.innerText || "").includes(expectedText)
+                );
+
+                if (!pre) {
+                    return {ok: false, error: "Codeblock nicht gefunden"};
+                }
+
+                const describe = button => ({
+                    ariaLabel: button.getAttribute("aria-label"),
+                    title: button.getAttribute("title"),
+                    text: (button.innerText || "").trim(),
+                    testId: button.getAttribute("data-testid")
+                });
+
+                const isCodeCopyButton = button => {
+                    const label = [
+                        button.getAttribute("aria-label") || "",
+                        button.getAttribute("title") || "",
+                        button.innerText || "",
+                        button.getAttribute("data-testid") || ""
+                    ].join(" ").toLowerCase();
+
+                    if (/copy message|kopiere nachricht/.test(label)) {
+                        return false;
+                    }
+
+                    return /copy code|copy code block|kopiere code|code kopieren/.test(label);
+                };
+
+                // Zuerst im pre-Element und dann in jedem einzelnen
+                // Vorfahren suchen, ohne die gesamte Nachrichtenkarte
+                // pauschal nach irgendeinem Copy-Button zu durchsuchen.
+                let node = pre;
+
+                for (let level = 0; node && level < 5; level++) {
+                    const buttons = [...node.querySelectorAll("button")];
+                    const button = buttons.find(isCodeCopyButton);
+
+                    if (button) {
+                        const details = {
+                            ...describe(button),
+                            ancestorLevel: level
+                        };
+
+                        button.click();
+                        return {ok: true, button: details};
+                    }
+
+                    node = node.parentElement;
+                }
+
+                // Diagnoseausgabe: Beschriftungen und Positionen
+                // aller Buttons in der Nähe des Codeblocks.
+                const nearby = [];
+                node = pre;
+
+                for (let level = 0; node && level < 5; level++) {
+                    for (const button of node.querySelectorAll("button")) {
+                        nearby.push({
+                            ...describe(button),
+                            ancestorLevel: level
+                        });
+                    }
+                    node = node.parentElement;
+                }
+
+                return {
+                    ok: false,
+                    error: "Keine eindeutig erkennbare Code-Kopierschaltfläche gefunden",
+                    nearbyButtons: nearby.slice(0, 40)
+                };
+            }""",
+            "COPY_CODE_TEST",
+        )
+        if not click_result.get("ok"):
+            log(f"Schaltfläche nicht gefunden: {click_result}")
+            raise RuntimeError(
+                "Die Kopierschaltfläche konnte nicht identifiziert werden."
+            )
+
+        log(f"Angeklickte Schaltfläche: {click_result['button']}")
+
+        # Zwischenablage auslesen.
+        sleep(0.5)
+        copied_code = page.evaluate(
+            """async () => await navigator.clipboard.readText()"""
+        )
+
+        print("\n--- VERGLEICH ---")
+        print(f"DOM-Code:           {displayed_code!r}")
+        print(f"Zwischenablage:     {copied_code.strip()!r}")
+        print(f"Erwarteter Code:    {EXPECTED!r}")
+
+        if copied_code.strip() == displayed_code:
+            log("ERFOLG: Zwischenablage entspricht exakt dem angezeigten Code.")
+        else:
+            log("ABWEICHUNG: Zwischenablage und DOM-Code unterscheiden sich.")
+
+        if copied_code.strip() == EXPECTED:
+            log("ERFOLG: Der erwartete Python-Code wurde korrekt kopiert.")
+        else:
+            log("HINWEIS: Kopierter Inhalt entspricht nicht exakt dem Sollwert.")
+
+        print("\nTest beendet. Das Browserprofil bleibt erhalten.")
+
+    except PlaywrightTimeout as exc:
+        log(f"TIMEOUT: {exc}")
+        raise
+    finally:
+        context.close()

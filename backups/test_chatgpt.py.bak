@@ -1,0 +1,148 @@
+from pathlib import Path
+from time import monotonic
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+PROFILE = Path.home() / "Debugger" / "brave-agent-profile"
+MARKER = "DEBUGGER-20261014"
+TEST_MESSAGE = (
+    "Antworte exakt mit AGENT_TEST_OK und sonst nichts. "
+    f"Testkennung: {MARKER}"
+)
+
+START = monotonic()
+
+def log(message):
+    print(f"[{monotonic() - START:6.2f}s] {message}", flush=True)
+
+with sync_playwright() as p:
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=["--no-first-run", "--no-default-browser-check", "--start-maximized"],
+    )
+
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+
+        log("Öffne ChatGPT.")
+        page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+
+        # Tatsächliches Eingabefeld aus der Browseraufzeichnung.
+        textbox = page.locator('[role="textbox"][aria-label="Ask ChatGPT"]')
+        textbox.wait_for(state="visible", timeout=60000)
+
+        previous_users = page.locator(
+            '[data-message-author-role="user"]'
+        ).count()
+
+        log("Trage Testnachricht ein.")
+        textbox.fill(TEST_MESSAGE)
+
+        # Nicht die Bildschirmposition verwenden:
+        # Senden-Button direkt im DOM finden und auslösen.
+        result = textbox.evaluate("""
+            textbox => {
+                const form = textbox.closest("form");
+                const button =
+                    form?.querySelector('button[aria-label="Send"]') ||
+                    document.querySelector('button[aria-label="Send"]');
+
+                if (!button) {
+                    return {ok: false, reason: "Senden-Button nicht gefunden"};
+                }
+
+                if (button.disabled ||
+                    button.getAttribute("aria-disabled") === "true") {
+                    return {
+                        ok: false,
+                        reason: "Senden-Button ist deaktiviert",
+                        disabled: button.disabled,
+                        ariaDisabled: button.getAttribute("aria-disabled")
+                    };
+                }
+
+                button.click();
+
+                return {
+                    ok: true,
+                    method: "JavaScript element.click()",
+                    ariaLabel: button.getAttribute("aria-label")
+                };
+            }
+        """)
+
+        log(f"DOM-Versand ausgelöst: {result}")
+
+        if not result["ok"]:
+            raise RuntimeError(str(result))
+
+        log("Prüfe, ob die Nachricht im Chat erscheint.")
+        page.wait_for_function(
+            """marker => {
+                const messages = [
+                    ...document.querySelectorAll(
+                        '[data-message-author-role="user"]'
+                    )
+                ];
+                return messages.some(m => m.innerText.includes(marker));
+            }""",
+            arg=MARKER,
+            timeout=20000,
+        )
+
+        current_users = page.locator(
+            '[data-message-author-role="user"]'
+        ).count()
+
+        if current_users <= previous_users:
+            log("Marker gefunden, aber die Nachrichtenanzahl ist unverändert.")
+        else:
+            log("ERFOLG: Die Testnachricht wurde im Chat angezeigt.")
+
+        log("Warte maximal 35 Sekunden auf eine Antwort.")
+        try:
+            page.wait_for_function(
+                """marker => {
+                    const users = [
+                        ...document.querySelectorAll(
+                            '[data-message-author-role="user"]'
+                        )
+                    ];
+                    const sent = users.some(m => m.innerText.includes(marker));
+                    const assistants = document.querySelectorAll(
+                        '[data-message-author-role="assistant"]'
+                    );
+                    return sent && assistants.length > 0;
+                }""",
+                arg=MARKER,
+                timeout=35000,
+            )
+
+            page.wait_for_timeout(1500)
+
+            answer = page.locator(
+                '[data-message-author-role="assistant"]'
+            ).last.inner_text().strip()
+
+            print("\n--- CHATGPT-ANTWORT ---")
+            print(answer)
+
+            if "AGENT_TEST_OK" in answer:
+                log("ERFOLG: Antwortmarker erkannt.")
+            else:
+                log("Antwort vorhanden; Antwortmarker nicht erkannt.")
+
+        except PlaywrightTimeout:
+            log("Keine Antwort innerhalb des Zeitlimits erkannt.")
+
+        input("\nTest beendet. Enter schließt Brave.")
+
+    except Exception as exc:
+        log(f"FEHLER: {type(exc).__name__}: {exc}")
+        input("Enter schließt Brave.")
+
+    finally:
+        context.close()

@@ -1,0 +1,227 @@
+from pathlib import Path
+from time import monotonic
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+PROFILE = Path.home() / "Debugger" / "brave-agent-profile"
+TEST_MESSAGE = (
+    "Antworte exakt mit AGENT_TEST_OK und sonst nichts. "
+    "Testkennung: DEBUGGER-20261014"
+)
+MARKER = "DEBUGGER-20261014"
+
+def log(message):
+    print(f"[{monotonic() - START:7.2f}s] {message}", flush=True)
+
+START = monotonic()
+
+with sync_playwright() as p:
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE),
+        executable_path="/snap/bin/brave",
+        headless=False,
+        chromium_sandbox=True,
+        no_viewport=True,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+        ],
+    )
+
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+
+        log("Öffne ChatGPT.")
+        page.goto(
+            "https://chatgpt.com/",
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+
+        textbox = page.locator("#pending-home-input")
+
+        log("Warte auf sichtbares Eingabefeld.")
+        textbox.wait_for(state="visible", timeout=120000)
+        log("Eingabefeld sichtbar.")
+
+        # Vorhandene Nachrichten zählen, bevor wir senden.
+        previous_user_count = page.locator(
+            '[data-message-author-role="user"]'
+        ).count()
+
+        textbox.fill(TEST_MESSAGE)
+
+        if textbox.input_value() != TEST_MESSAGE:
+            raise RuntimeError("Text wurde nicht korrekt eingetragen.")
+
+        log("Text eingetragen und überprüft.")
+
+        # Auf den tatsächlichen Senden-Button warten.
+        # Kein blindes Enter und keine feste Wartezeit nach dem Einfügen.
+        log("Suche den Senden-Button im DOM und löse ihn per JavaScript aus.")
+
+        clicked = page.locator("#pending-home-input").evaluate("""
+            textarea => {
+                const form = textarea.closest("form");
+
+                if (!form) {
+                    return {
+                        ok: false,
+                        reason: "Kein Formular am Eingabefeld gefunden"
+                    };
+                }
+
+                const buttons = [...form.querySelectorAll("button")];
+
+                const button = buttons.find(b => {
+                    const testId = b.getAttribute("data-testid") || "";
+                    const label = b.getAttribute("aria-label") || "";
+
+                    return (
+                        testId.includes("send") ||
+                        /send|senden|abschicken/i.test(label)
+                    ) &&
+                    !b.disabled &&
+                    b.getAttribute("aria-disabled") !== "true";
+                });
+
+                if (!button) {
+                    return {
+                        ok: false,
+                        reason: "Kein aktivierter Senden-Button gefunden",
+                        buttons: buttons.map(b => ({
+                            label: b.getAttribute("aria-label"),
+                            testId: b.getAttribute("data-testid"),
+                            disabled: b.disabled
+                        }))
+                    };
+                }
+
+                button.click();
+
+                return {
+                    ok: true,
+                    label: button.getAttribute("aria-label"),
+                    testId: button.getAttribute("data-testid")
+                };
+            }
+        """)
+
+        log(f"JavaScript-Klick: {clicked}")
+
+        if not clicked["ok"]:
+            raise RuntimeError(f"Senden fehlgeschlagen: {clicked}")
+
+        log("Klick ausgeführt. Prüfe den tatsächlichen Versand.")
+
+        page.wait_for_function(
+            """args => {
+                const messages = [
+                    ...document.querySelectorAll(
+                        '[data-message-author-role="user"]'
+                    )
+                ];
+
+                return messages.some(
+                    message => message.innerText.includes(args.marker)
+                ) && (
+                    messages.length > args.previousCount ||
+                    document.querySelector(
+                        '[data-testid="stop-button"]'
+                    ) !== null
+                );
+            }""",
+            arg={
+                "marker": MARKER,
+                "previousCount": previous_user_count,
+            },
+            timeout=20000,
+        )
+
+        matching_messages = page.locator(
+            '[data-message-author-role="user"]'
+        ).filter(has_text=MARKER)
+
+        if matching_messages.count() == 0:
+            raise RuntimeError(
+                "Versand nicht bestätigt: Testnachricht nicht gefunden."
+            )
+
+        log("ERFOLG: Testnachricht erscheint im Chat.")
+        log("Warte auf die Antwort.")
+
+        previous_assistant_count = page.locator(
+            '[data-message-author-role="assistant"]'
+        ).count()
+
+        page.wait_for_function(
+            """previousCount => {
+                const messages = [
+                    ...document.querySelectorAll(
+                        '[data-message-author-role="assistant"]'
+                    )
+                ];
+
+                if (messages.length <= previousCount) return false;
+
+                const last = messages[messages.length - 1];
+                const text = last.innerText.trim();
+
+                const generating =
+                    document.querySelector(
+                        '[data-testid="stop-button"]'
+                    ) !== null;
+
+                return text.length > 0 && !generating;
+            }""",
+            arg=previous_assistant_count,
+            timeout=120000,
+        )
+
+        answer = page.locator(
+            '[data-message-author-role="assistant"]'
+        ).last.inner_text().strip()
+
+        print("\n=== CHATGPT-ANTWORT ===")
+        print(answer)
+        print("\n=== TESTERGEBNIS ===")
+
+        if "AGENT_TEST_OK" in answer:
+            log("ERFOLG: Antwortmarker erkannt.")
+        else:
+            log("Antwort vorhanden, aber Antwortmarker fehlt.")
+
+        input("\nTest beendet. Enter im Terminal schließt Brave.")
+
+    except PlaywrightTimeout as exc:
+        log(f"TIMEOUT: {exc}")
+        print("URL:", page.url if "page" in locals() else "unbekannt")
+
+        if "page" in locals():
+            print("Textarea vorhanden:",
+                  page.locator("#pending-home-input").count())
+
+            print("Sichtbare Buttons:")
+            for button in page.locator("button").all():
+                try:
+                    if button.is_visible():
+                        print(button.evaluate("""el => ({
+                            text: (el.innerText || '').trim(),
+                            ariaLabel: el.getAttribute('aria-label'),
+                            testId: el.getAttribute('data-testid'),
+                            disabled: el.disabled
+                        })"""))
+                except Exception:
+                    pass
+
+            page.screenshot(path="send-failed.png", full_page=True)
+            print("Screenshot: ~/Debugger/send-failed.png")
+
+        input("Diagnose beendet. Enter schließt Brave.")
+
+    except Exception as exc:
+        log(f"FEHLER: {type(exc).__name__}: {exc}")
+        input("Fehler protokolliert. Enter schließt Brave.")
+
+    finally:
+        context.close()
