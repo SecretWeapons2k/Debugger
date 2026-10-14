@@ -4,5 +4,8 @@ __pycache__/
 *.pyc
 brave-agent-profile/
 logs/
-diagnostics/
+diagnostics/*
+!diagnostics/observe_browser.py
 codeblock_cache.json
+/backups/pre-diagnostics-publish-*/
+/backups/pre-observer-error-handling-*/
